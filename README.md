@@ -1,4 +1,4 @@
-# Toolforge MCP
+# SimpleMCP
 
 A lightweight MCP-like alternative (Model Context Protocol) server that lets you bolt on tool "kits" without touching the core. Drop a new `_kit.py` file in `kits/`, slap a `@tool` decorator on your functions, and the server picks them up automatically. No manual imports, no config files, no fuss.
 
@@ -55,7 +55,3 @@ Run the client:
 ```bash
 streamlit run client.py
 ```
-
-## Why?
-
-I built this after repeatedly running into inconsistent MCP documentation and setup friction. The goal was to produce a tool framework that is straightforward to extend, predictable to run, and doesn't require spelunking through configuration just to add a function.
