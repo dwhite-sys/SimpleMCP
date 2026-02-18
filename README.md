@@ -4,7 +4,7 @@ A lightweight MCP-like alternative (Model Context Protocol) server that lets you
 
 ## How it works
 
-- **Server** (`server.py`): FastAPI app with two endpoints — `/list_tools` (returns all registered tools in Groq-compatible schema format) and `/run_tool` (executes a tool by name with JSON args).
+- **Server** (`server.py`): Dual-mode server. When run via uvicorn it exposes a FastAPI HTTP app with `/list_tools` and `/run_tool` endpoints. When run directly (`python server.py`) it starts an MCP-standard JSON-RPC 2.0 stdio server.
 - **Kits** (`kits/`): Each kit is a Python file with `@tool`-decorated functions. The `kits/__init__.py` auto-discovers and imports every kit at startup.
 - **Registry** (`utils/registry.py`): The `@tool` decorator registers functions into a global dict. `extract_parameters` scrapes type hints to build JSON Schema for the tool's I/O.
 - **Client** (`client.py`): Streamlit frontend that talks to the server and routes tool calls through Groq.
@@ -47,11 +47,35 @@ export GROQ_API_KEY="your-groq-key"
 ```
 
 Run the server:
+
+**HTTP mode** (for Streamlit client / browser debugging):
 ```bash
 uvicorn server:app --host 0.0.0.0 --port 8000
+```
+
+**MCP stdio mode** (for Claude Desktop and any MCP-compatible host):
+```bash
+python server.py
 ```
 
 Run the client:
 ```bash
 streamlit run client.py
 ```
+
+## Connecting to Claude Desktop
+
+Add this to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "simplemcp": {
+      "command": "python",
+      "args": ["/absolute/path/to/server.py"]
+    }
+  }
+}
+```
+
+Claude Desktop will spawn `server.py` as a child process and communicate over stdin/stdout using MCP JSON-RPC 2.0.

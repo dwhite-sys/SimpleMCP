@@ -4,7 +4,12 @@ import os
 from utils import tool
 from tavily import TavilyClient
 
-client = TavilyClient(os.getenv("TAVILY_API_KEY", ""))
+def _client():
+    """Lazily create a TavilyClient so a missing key fails at call-time, not import-time."""
+    key = os.getenv("TAVILY_API_KEY", "")
+    if not key:
+        raise EnvironmentError("TAVILY_API_KEY is not set")
+    return TavilyClient(key)
 
 # ------------------------------------------------------------
 # Extract single page content
@@ -13,7 +18,7 @@ client = TavilyClient(os.getenv("TAVILY_API_KEY", ""))
 @tool
 def extract_page_content(url: str):
     try:
-        return dict(client.extract(url))
+        return dict(_client().extract(url))
     except Exception as e:
         return {"error": f"Tavily extract failed: {e}"}
 
@@ -25,7 +30,7 @@ def extract_page_content(url: str):
 @tool
 def web_search(query: str):
     try:
-        return dict(client.search(query))
+        return dict(_client().search(query))
     except Exception as e:
         return {"error": f"Tavily search failed: {e}"}
 
@@ -40,7 +45,7 @@ def web_crawl(url: str):
     Crawl multiple starting from a single URL.
     """
     try:
-        return dict(client.crawl(url, max_depth=5)) # <- Set a hard limit so the LLM doesn't go overboard
+        return dict(_client().crawl(url, max_depth=5)) # <- Set a hard limit so the LLM doesn't go overboard
     except Exception as e:
         return {"error": f"Tavily crawl failed: {e}"}
 
@@ -55,7 +60,7 @@ def web_map(url: str):
     Generate structured summaries + relationships across many URLs.
     """
     try:
-        return dict(client.map(url, max_breadth=5, max_depth=3))
+        return dict(_client().map(url, max_breadth=5, max_depth=3))
     except Exception as e:
         return {"error": f"Tavily map failed: {e}"}
     
