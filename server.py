@@ -11,7 +11,7 @@ import kits  # noqa: F401
 # import kits.sqlite_kit  # noqa: F401
 # import kits.web_kit     # noqa: F401
 
-app = FastAPI(title="Toolforge MCP Server")
+app = FastAPI(title="SimpleMCP Server")
 
 
 @app.get("/list_tools")
