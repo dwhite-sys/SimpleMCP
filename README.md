@@ -71,7 +71,7 @@ Add this to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "simplemcp": {
-      "command": "python",
+      "command": "the venv .exe",
       "args": ["/absolute/path/to/server.py"]
     }
   }
