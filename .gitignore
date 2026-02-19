@@ -4,3 +4,10 @@ __pycache__/
 *.db
 !example.db
 output.txt
+
+# Environment / secrets
+.env
+*.env
+
+# Chat history
+chat.json

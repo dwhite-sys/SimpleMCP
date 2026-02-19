@@ -2,5 +2,5 @@ fastapi
 uvicorn
 streamlit
 requests
-groq
+openai
 tavily-python

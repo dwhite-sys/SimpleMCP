@@ -4,14 +4,19 @@ import sqlite3
 import json
 import groq
 import os
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
 
 # =====================================================================
 #    CONFIG
 # =====================================================================
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = "openai/gpt-oss-120b"
-groq_client = groq.Groq(api_key=GROQ_API_KEY)
+GROQ_MODEL = "openai/gpt-oss-20b"
+
+def get_groq_client():
+    key = os.environ.get("GROQ_API_KEY")
+    return groq.Groq(api_key=key)
 
 tool_call_limit = 5
 tool_calls = 0
@@ -83,7 +88,7 @@ def run_model(messages: list):
     global tool_call_limit
     global tool_calls
     while True:
-        response = groq_client.chat.completions.create(
+        response = get_groq_client().chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
             tools=tools,

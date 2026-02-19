@@ -55,7 +55,7 @@ def web_crawl(url: str):
 # ------------------------------------------------------------
 
 @tool
-def web_map(url: str):
+def web_map(url: str) -> dict:
     """
     Generate structured summaries + relationships across many URLs.
     """
