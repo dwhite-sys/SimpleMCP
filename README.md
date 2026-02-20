@@ -4,9 +4,10 @@ A lightweight MCP-like alternative (Model Context Protocol) server that lets you
 
 ## How it works
 
-- **Server** (`server.py`): Dual-mode server. When run via uvicorn it exposes a FastAPI HTTP app with `/list_tools` and `/run_tool` endpoints. When run directly (`python server.py`) it starts an MCP-standard JSON-RPC 2.0 stdio server.
+- **Server** (`server.py`): Three operating modes (see below). Auto-discovers all kits at startup.
 - **Kits** (`kits/`): Each kit is a Python file with `@tool`-decorated functions. The `kits/__init__.py` auto-discovers and imports every kit at startup.
 - **Registry** (`utils/registry.py`): The `@tool` decorator registers functions into a global dict. `extract_parameters` scrapes type hints to build JSON Schema for the tool's I/O.
+- **Config** (`config.py`): `MCP_MODE` flag (default `False`). Set `MCP_MODE=true` via env var or edit the file directly.
 - **Client** (`client.py`): Streamlit frontend that talks to the server and routes tool calls through Groq.
 
 ## Kits included
@@ -53,6 +54,14 @@ Run the server:
 uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
+**MCP HTTP mode** (standard MCP endpoints over HTTP — for any MCP-compatible HTTP client):
+```bash
+MCP_MODE=true uvicorn server:app --host 0.0.0.0 --port 8000
+```
+Exposes a single MCP endpoint at `/mcp`:
+- `POST /mcp` — JSON-RPC 2.0 dispatch (`initialize`, `tools/list`, `tools/call`); responds as SSE or JSON depending on client `Accept` header
+- `GET  /mcp` — SSE stream for server-initiated messages / keepalive
+
 **MCP stdio mode** (for Claude Desktop and any MCP-compatible host):
 ```bash
 python server.py
@@ -70,9 +79,10 @@ Add this to your `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "simplemcp": {
+    "SimpleMCP": {
       "command": "/absolute/path/to/SimpleMCP/venv/python.exe",
-      "args": ["/absolute/path/to/server.py"]
+      "args": ["/absolute/path/to/server.py"],
+      "env": {"TAVILY_API_KEY": "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"}
     }
   }
 }

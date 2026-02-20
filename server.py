@@ -1,8 +1,10 @@
 import sys
 import json
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from utils import get_tools, extract_parameters
+from config import MCP_MODE
 
 # Auto-discover all kits (dynamic import via kits/__init__.py)
 import kits  # noqa: F401
@@ -68,6 +70,155 @@ def run_tool(req: dict):
 
 
 # =============================================================================
+#  MCP HTTP mode — registered only when MCP_MODE=True
+#
+#  Implements the MCP Streamable HTTP transport (spec 2025-06-18):
+#    POST /mcp  →  JSON-RPC 2.0 dispatch; responds as SSE or plain JSON
+#                  depending on the client's Accept header
+#    GET  /mcp  →  SSE keepalive stream for server-initiated messages
+#
+#  Enable:  MCP_MODE=true uvicorn server:app --host 0.0.0.0 --port 8000
+# =============================================================================
+
+def _build_tool_schema_http(name: str, func) -> dict:
+    """MCP-standard tool descriptor for HTTP discovery."""
+    return {
+        "name": name,
+        "description": func.__doc__ or "",
+        "inputSchema": extract_parameters(func),
+    }
+
+
+def _sse_message(obj: dict) -> str:
+    """Format a dict as a single SSE data event."""
+    return f"data: {json.dumps(obj)}\n\n"
+
+
+if MCP_MODE:
+
+    @app.get("/mcp")
+    async def mcp_sse_stream(request: Request):
+        """
+        GET /mcp — SSE stream for server-initiated messages.
+        MCP Inspector opens this to listen for server pushes.
+        We return a valid SSE stream that stays open (keepalive).
+        """
+        async def event_stream():
+            # Keepalive: send a comment every 15 s so the connection stays open
+            import asyncio
+            while True:
+                if await request.is_disconnected():
+                    break
+                yield ": keepalive\n\n"
+                await asyncio.sleep(15)
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
+
+    @app.post("/mcp")
+    async def mcp_jsonrpc(request: Request):
+        """
+        POST /mcp — Streamable HTTP JSON-RPC 2.0 dispatch.
+        Responds as SSE when the client sends Accept: text/event-stream,
+        otherwise plain application/json.
+        Handles: initialize, tools/list, tools/call
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"jsonrpc": "2.0", "id": None,
+                 "error": {"code": -32700, "message": "Parse error"}},
+                status_code=400,
+            )
+
+        req_id = body.get("id")
+        method = body.get("method", "")
+        params = body.get("params") or {}
+        tools = get_tools()
+        accept = request.headers.get("accept", "")
+        wants_sse = "text/event-stream" in accept
+
+        def make_response(result: dict):
+            payload = {"jsonrpc": "2.0", "id": req_id, "result": result}
+            if wants_sse:
+                return StreamingResponse(
+                    iter([_sse_message(payload)]),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache",
+                             "X-Accel-Buffering": "no"},
+                )
+            return JSONResponse(payload)
+
+        def make_error(code: int, message: str):
+            payload = {"jsonrpc": "2.0", "id": req_id,
+                       "error": {"code": code, "message": message}}
+            if wants_sse:
+                return StreamingResponse(
+                    iter([_sse_message(payload)]),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache",
+                             "X-Accel-Buffering": "no"},
+                )
+            return JSONResponse(payload)
+
+        # ── notifications (fire-and-forget) ─────────────────────────────────
+        if method.startswith("notifications/"):
+            return JSONResponse(status_code=202, content=None)
+
+        # ── initialize ───────────────────────────────────────────────────────
+        if method == "initialize":
+            result = {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "SimpleMCP", "version": "1.0.0"},
+            }
+            if wants_sse:
+                payload = {"jsonrpc": "2.0", "id": req_id, "result": result}
+                return StreamingResponse(
+                    iter([_sse_message(payload)]),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache",
+                             "X-Accel-Buffering": "no"},
+                )
+            return JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": result})
+
+        # ── tools/list ───────────────────────────────────────────────────────
+        elif method == "tools/list":
+            return make_response({
+                "tools": [
+                    _build_tool_schema_http(n, f) for n, f in tools.items()
+                ]
+            })
+
+        # ── tools/call ───────────────────────────────────────────────────────
+        elif method == "tools/call":
+            tool_name = params.get("name")
+            arguments = params.get("arguments") or {}
+
+            if tool_name not in tools:
+                return make_error(-32601, f"Tool '{tool_name}' not found")
+
+            try:
+                result = tools[tool_name](**arguments)
+                if not isinstance(result, str):
+                    result = json.dumps(result, ensure_ascii=False)
+                return make_response({
+                    "content": [{"type": "text", "text": result}],
+                    "isError": False,
+                })
+            except Exception as e:
+                return make_response({
+                    "content": [{"type": "text", "text": f"{type(e).__name__}: {e}"}],
+                    "isError": True,
+                })
+
+        else:
+            return make_error(-32601, f"Method not found: {method}")
+
+
+# =============================================================================
 #  MCP stdio mode — runs when the script is executed directly:
 #    python server.py
 #
@@ -88,14 +239,6 @@ def _mcp_error(id, code: int, message: str):
         "error": {"code": code, "message": message},
     })
 
-
-def _build_tool_schema(name: str, func) -> dict:
-    """Return an MCP-standard tool descriptor for a registered function."""
-    return {
-        "name": name,
-        "description": func.__doc__ or "",
-        "inputSchema": extract_parameters(func),
-    }
 
 
 def run_stdio_mcp():
@@ -149,7 +292,7 @@ def run_stdio_mcp():
             # ── tools/list ──────────────────────────────────────────────────
             elif method == "tools/list":
                 tool_schemas = [
-                    _build_tool_schema(name, func)
+                    _build_tool_schema_http(name, func)
                     for name, func in get_tools().items()
                 ]
                 _mcp_send({
