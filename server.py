@@ -1,10 +1,14 @@
 import sys
 import json
-import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from utils import get_tools, extract_parameters
 from config import MCP_MODE
+
+_executor = ThreadPoolExecutor()
 
 # Auto-discover all kits (dynamic import via kits/__init__.py)
 import kits  # noqa: F401
@@ -15,12 +19,20 @@ import kits  # noqa: F401
 
 app = FastAPI(title="SimpleMCP Server")
 
+# Allow OpenWebUI (and any other origin) to reach the MCP endpoint
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/list_tools")
 def list_tools():
     """
     Expose all registered tools in Groq-style schema format:
-    [d
+    [
       {
         "type": "function",
         "function": {
@@ -46,7 +58,7 @@ def list_tools():
 
 
 @app.post("/run_tool")
-def run_tool(req: dict):
+async def run_tool(req: dict):
     """
     Execute a tool by name with JSON arguments.
     Request JSON:
@@ -63,7 +75,8 @@ def run_tool(req: dict):
 
     func = tools[name]
     try:
-        result = func(**args)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(_executor, lambda: func(**args))
         return {"result": result}
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
@@ -105,7 +118,6 @@ if MCP_MODE:
         """
         async def event_stream():
             # Keepalive: send a comment every 15 s so the connection stays open
-            import asyncio
             while True:
                 if await request.is_disconnected():
                     break
@@ -174,15 +186,7 @@ if MCP_MODE:
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "SimpleMCP", "version": "1.0.0"},
             }
-            if wants_sse:
-                payload = {"jsonrpc": "2.0", "id": req_id, "result": result}
-                return StreamingResponse(
-                    iter([_sse_message(payload)]),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache",
-                             "X-Accel-Buffering": "no"},
-                )
-            return JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": result})
+            return make_response(result)
 
         # ── tools/list ───────────────────────────────────────────────────────
         elif method == "tools/list":
@@ -201,7 +205,8 @@ if MCP_MODE:
                 return make_error(-32601, f"Tool '{tool_name}' not found")
 
             try:
-                result = tools[tool_name](**arguments)
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(_executor, lambda: tools[tool_name](**arguments))
                 if not isinstance(result, str):
                     result = json.dumps(result, ensure_ascii=False)
                 return make_response({
@@ -240,110 +245,119 @@ def _mcp_error(id, code: int, message: str):
     })
 
 
+async def _handle_request(req: dict):
+    """Handle a single JSON-RPC request asynchronously."""
+    req_id = req.get("id")
+    method = req.get("method", "")
+    params = req.get("params", {})
+    loop = asyncio.get_running_loop()
 
-def run_stdio_mcp():
-    """
-    JSON-RPC 2.0 stdio loop implementing the Anthropic MCP standard.
+    try:
+        if method == "initialize":
+            _mcp_send({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "SimpleMCP", "version": "1.0.0"},
+                },
+            })
 
-    Supported methods:
-      initialize    — handshake; returns server capabilities
-      tools/list    — list all registered tools
-      tools/call    — execute a tool by name with arguments
-    """
-    # Redirect stderr so accidental print() calls don't corrupt the JSON stream
-    _log = sys.stderr
+        elif method == "tools/list":
+            tool_schemas = [
+                _build_tool_schema_http(name, func)
+                for name, func in get_tools().items()
+            ]
+            _mcp_send({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"tools": tool_schemas},
+            })
 
-    _log.write("[SimpleMCP] stdio/MCP mode active. Waiting for requests...\n")
-    _log.flush()
+        elif method == "tools/call":
+            tool_name = params.get("name")
+            arguments = params.get("arguments", {})
+            tools = get_tools()
 
-    for raw_line in sys.stdin:
-        raw_line = raw_line.strip()
-        if not raw_line:
-            continue
+            if tool_name not in tools:
+                _mcp_error(req_id, -32601, f"Tool '{tool_name}' not found")
+                return
 
-        # --- Parse ---
-        try:
-            req = json.loads(raw_line)
-        except json.JSONDecodeError as e:
-            _mcp_error(None, -32700, f"Parse error: {e}")
-            continue
-
-        req_id = req.get("id")
-        method = req.get("method", "")
-        params = req.get("params", {})
-
-        # --- Dispatch ---
-        try:
-            # ── initialize ──────────────────────────────────────────────────
-            if method == "initialize":
+            try:
+                # Run blocking tool in thread executor so parallel calls don't block
+                result = await loop.run_in_executor(
+                    _executor, lambda: tools[tool_name](**arguments)
+                )
+                if not isinstance(result, str):
+                    result = json.dumps(result, ensure_ascii=False)
                 _mcp_send({
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "result": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {"tools": {}},
-                        "serverInfo": {
-                            "name": "SimpleMCP",
-                            "version": "1.0.0",
-                        },
+                        "content": [{"type": "text", "text": result}],
+                        "isError": False,
                     },
                 })
-
-            # ── tools/list ──────────────────────────────────────────────────
-            elif method == "tools/list":
-                tool_schemas = [
-                    _build_tool_schema_http(name, func)
-                    for name, func in get_tools().items()
-                ]
+            except Exception as e:
                 _mcp_send({
                     "jsonrpc": "2.0",
                     "id": req_id,
-                    "result": {"tools": tool_schemas},
+                    "result": {
+                        "content": [{"type": "text", "text": f"{type(e).__name__}: {e}"}],
+                        "isError": True,
+                    },
                 })
 
-            # ── tools/call ──────────────────────────────────────────────────
-            elif method == "tools/call":
-                tool_name = params.get("name")
-                arguments = params.get("arguments", {})
+        elif method.startswith("notifications/"):
+            pass  # fire-and-forget, no response
 
-                tools = get_tools()
-                if tool_name not in tools:
-                    _mcp_error(req_id, -32601, f"Tool '{tool_name}' not found")
-                    continue
+        else:
+            _mcp_error(req_id, -32601, f"Method not found: {method}")
 
-                try:
-                    result = tools[tool_name](**arguments)
-                    # MCP expects content as a list of content blocks
-                    if not isinstance(result, str):
-                        result = json.dumps(result, ensure_ascii=False)
-                    _mcp_send({
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "result": {
-                            "content": [{"type": "text", "text": result}],
-                            "isError": False,
-                        },
-                    })
-                except Exception as e:
-                    _mcp_send({
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "result": {
-                            "content": [{"type": "text", "text": f"{type(e).__name__}: {e}"}],
-                            "isError": True,
-                        },
-                    })
+    except Exception as e:
+        _mcp_error(req_id, -32603, f"Internal error: {e}")
 
-            # ── notifications (no response required) ────────────────────────
-            elif method.startswith("notifications/"):
-                pass  # fire-and-forget, no response
 
-            # ── unknown method ───────────────────────────────────────────────
-            else:
-                _mcp_error(req_id, -32601, f"Method not found: {method}")
+async def _stdio_loop():
+    """
+    Async stdin reader — dispatches each request as a concurrent task
+    so parallel tool calls from clients like Codex don't block each other.
+    """
+    _log = sys.stderr
+    _log.write("[SimpleMCP] stdio/MCP mode active. Waiting for requests...\n")
+    _log.flush()
 
-        except Exception as e:
-            _mcp_error(req_id, -32603, f"Internal error: {e}")
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader()
+    protocol = asyncio.StreamReaderProtocol(reader)
+    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+
+    while True:
+        try:
+            raw = await reader.readline()
+        except Exception:
+            break
+        if not raw:
+            break
+
+        line = raw.decode().strip()
+        if not line:
+            continue
+
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError as e:
+            _mcp_error(None, -32700, f"Parse error: {e}")
+            continue
+
+        # Fire off each request as its own task — parallel tool calls run concurrently
+        asyncio.create_task(_handle_request(req))
+
+
+def run_stdio_mcp():
+    """Entry point for stdio/MCP mode. Runs the async event loop."""
+    asyncio.run(_stdio_loop())
 
 
 if __name__ == "__main__":
